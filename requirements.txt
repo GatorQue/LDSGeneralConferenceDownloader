@@ -1,4 +1,5 @@
 colorama==0.4.4
 mutagen==1.45.1
 PySimpleGUI==4.40.0
+selenium==4.18.1
 tqdm==4.60.0

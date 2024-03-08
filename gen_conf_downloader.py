@@ -8,6 +8,7 @@ import datetime
 import glob
 import io
 import json
+import logging
 import os
 import pathlib
 import re
@@ -21,6 +22,11 @@ from collections import namedtuple
 import html as html_tools
 from html.parser import HTMLParser
 import PySimpleGUI as sg
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.edge.options import Options
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.wait import WebDriverWait
 from tqdm import tqdm
 from urllib.parse import unquote_plus
 from urllib.parse import quote_plus
@@ -196,7 +202,7 @@ def download_all_content(args):
             progress_bar.write("Retrieving talk audio files and updating playlists")
         for talk in all_talks:
             progress_bar.set_description_str(talk.title, refresh=True)
-            audio = get_audio(args, talk)
+            audio = get_audio(args, f'{LDS_ORG_URL}{decode(talk.link)}')
             if audio and download_audio(progress_bar, args, get_relative_path(args, talk.session), audio):
                 if not args.noplaylists:
                     update_playlists(args, playlists, talk, audio)
@@ -302,9 +308,41 @@ def get_all_talks_by_topic(args):
                 break
     return topic_talks
 
+# Sometime after October 2023 the website was changed and hides the MP3 link
+# behind two button clicks. This code was added to allow for pushing the
+# two buttons and (re)saving the HTML.
+def get_audio_2024(args, url):
+    if not args.verbose:
+        for logger in [logging.getLogger(name) for name in logging.Logger.manager.loggerDict]:
+            logger.setLevel(logging.WARNING)
+    opt = Options()
+    opt.add_argument("--headless=new")
+    opt.add_argument("--enable-chrome-browser-cloud-management")
+    if not args.verbose:
+        service = webdriver.EdgeService(log_output="NUL")
+    else:
+        service = None
+    driver = webdriver.Edge(options=opt, service=service)
+    driver.get(url)
+    try:
+        options = driver.find_element(By.XPATH, '//button[@title="Options"]')
+        options.click()
+        try:
+            download = WebDriverWait(driver, 10).until(
+                EC.element_to_be_clickable((By.XPATH, '//button[@data-testid="download-menu-button"]'))
+            )
+            download.click()
+            if args.nocleanup:
+                add_to_cache(args, driver.page_source, url)
+            return re.search(MP3_DOWNLOAD_REGEX, driver.page_source)
+        finally:
+            pass
+    finally:
+        driver.close()
 
-def get_audio(args, talk):
-    link_html = get_html(args, f'{LDS_ORG_URL}{decode(talk.link)}')
+
+def get_audio(args, url):
+    link_html = get_html(args, url)
     mp3_link = re.search(MP3_DOWNLOAD_REGEX, link_html)
     # In April 2022 the MP3 link became buried in base64 encoded script section
     match = re.search(SCRIPT_BASE64_REGEX, link_html)
@@ -312,6 +350,7 @@ def get_audio(args, talk):
         # Extract and reuse the filename from the MP3 URL (exclude language)
         mp3_file = re.match(MP3_DOWNLOAD_FILENAME_REGEX, mp3_link.group(1))
     elif not mp3_link and not match:
+        sys.stderr.write(f'Problem finding mp3 link ({url}')
         return
     elif not mp3_link and match:
         # MP3 link is probably in the base64 encoded script section
@@ -319,6 +358,9 @@ def get_audio(args, talk):
         # Search for JSON object containing mediaUrl key and value
         mp3_link = re.search(MP3_MEDIAURL_REGEX, script_data)
         if not mp3_link:
+            mp3_link = get_audio_2024(args, url)
+        if not mp3_link:
+            sys.stderr.write(f'Problem finding mp3 link ({url}')
             return
         # Extract and reuse the filename from the MP3 URL
         mp3_file = re.match(MP3_MEDIAURL_FILENAME_REGEX, mp3_link.group(1))
@@ -647,7 +689,8 @@ if __name__ == '__main__':
                         default=music_home)
     parser.add_argument('-nocleanup',
                         help='Leaves temporary files after process completion.',
-                        action="store_true")
+                        action="store_true",
+                        default=True)
     parser.add_argument('-verbose',
                         help='Provides detailed activity logging instead of progress bars.',
                         action="store_true")
