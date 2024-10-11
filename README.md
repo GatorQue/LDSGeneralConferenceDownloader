@@ -39,6 +39,7 @@ Load these files onto a *memory stick* for your car, or into your *favourite med
 |`-v` or `-verbose`| |Provides detailed activity logging instead of progress bars.|
 |`-nonumbers`| |Skips adding numbers to session directory names.|
 |`-noplaylists`| |Skips creating m3u playlist files.|
+|`-notopics`| |Skip downloading speakers by topic.|
 |`-speaker-min`| |Minimum number of talks to create a speaker playlist file.|
 |`-nogui`| |Use command line only to show progress.|
 

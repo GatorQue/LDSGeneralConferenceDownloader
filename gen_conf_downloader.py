@@ -21,7 +21,7 @@ from collections import defaultdict
 from collections import namedtuple
 import html as html_tools
 from html.parser import HTMLParser
-import PySimpleGUI as sg
+import FreeSimpleGUI as sg
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.edge.options import Options
@@ -36,7 +36,7 @@ from mutagen.mp3 import MP3
 
 Conference = namedtuple('Conference', 'link title year month')
 Session = namedtuple('Session', 'conference link title number')
-Talk = namedtuple('Talk', 'session link title speaker topics')
+Talk = namedtuple('Talk', 'session link title speaker number topics')
 Audio = namedtuple('Audio', 'link file')
 Topic = namedtuple('Topic', 'link topic')
 TalkByTopic = namedtuple('TalkByTopic', 'link speaker title topic')
@@ -45,23 +45,24 @@ LDS_ORG_URL = 'https://www.churchofjesuschrist.org'
 ALL_CONFERENCES_URL = f'{LDS_ORG_URL}/study/general-conference'
 ALL_TOPICS_URL = f'{LDS_ORG_URL}/study/general-conference/topics'
 
-GET_LANGS_REGEX = 'data-lang=\".*?\" data-clang=\"(.*?)\">(.*?)</a>'
-CONFERENCES_REGEX = '<a[^>]*href="([^"]*)"[^>]*><div[^>]*><img[^>]*></div><span[^>]*>([A-Z][a-z]* \d{4})</span></a>'
-CONFERENCE_GROUPS_REGEX = '<a[^>]*href="([^"]*)"[^>]*><div[^>]*><img[^>]*></div><span[^>]*>(\d{4}.\d{4})</span></a>'
-CONFERENCE_GROUPS_RANGE_REGEX = '.*/(\d{4})(\d{4})\?lang=.*'
-CONFERENCE_LINK_YEAR_MONTH_REGEX = '.*(\d{4})/(\d{2})\?lang=.*'
+GET_LANGS_REGEX = r'lang=([^"]*?)\"[^>]*>(.*?)</a>'
+CONFERENCES_REGEX = r'<a[^>]*href="(/study/general-conference/\d[^"]*)"[^>]*>.*?<span[^>]*>([A-Z][a-z]* \d{4})</span></a>'
+CONFERENCE_GROUPS_REGEX = r'<a[^>]*href="(/study/general-conference/\d{8}[^"]*)"[^>]*>.*?<span[^>]*>(\d{4}.\d{4})</span></a>'
+CONFERENCE_GROUPS_RANGE_REGEX = r'.*/(\d{4})(\d{4})\?lang=.*'
+CONFERENCE_LINK_YEAR_MONTH_REGEX = r'.*(\d{4})/(\d{2})\?lang=.*'
 
-SCRIPT_BASE64_REGEX = '<script>window.__INITIAL_STATE__[^"]*"([^"]*)";</script>'
-MP3_DOWNLOAD_REGEX = '<a[^>]*href="([^"]*)"[^>]*>This Page \(MP3\).*?</a>'
-MP3_DOWNLOAD_FILENAME_REGEX = '.*/(.*\.mp3)\?lang=.*'
-MP3_MEDIAURL_REGEX = '{"mediaUrl":"([^"]*)","variant":"audio"}'
-MP3_MEDIAURL_FILENAME_REGEX = '.*/(.*\.mp3)'
+SCRIPT_BASE64_REGEX = r'<script>window.__INITIAL_STATE__[^"]*"([^"]*)";</script>'
+MP3_DOWNLOAD_REGEX = r'<a[^>]*href="([^"]*)"[^>]*>This Page \(MP3\).*?</a>'
+MP3_DOWNLOAD_FILENAME_REGEX = r'.*/(.*\.mp3)\?.*?'
 
-SESSIONS_REGEX = '<a[^>]*href="([^"]*)"[^>]*><div[^>]*><p><span[^>]*>([^<]*)</span></p></div></a><ul[^>]*>(.*?)</ul>'
-SESSION_TALKS_REGEX = '<a[^>]*href="([^"]*)"[^>]*><div[^>]*><p><span[^>]*>([^<]*)</span></p><p[^>]*>([^<]*)</p></div></a>'
+MP3_MEDIAURL_REGEX = r'{"mediaUrl":"([^"]*)","variant":"audio"}'
+MP3_MEDIAURL_FILENAME_REGEX = r'.*/(.*\.mp3)'
 
-TOPICS_REGEX = '<a[^>]*href=([^"]*)><div[^>]*><div[^>]*><div[^>]*><h4[^>]*>([^<]*)</h4></div></div></div><hr[^>]*></a>'
-TOPIC_TALKS_REGEX = '<a[^>]*href=([^"]*)><div[^>]*><div[^>]*><div[^>]*><h6[^>]*>[^<]*</h6><h6[^>]*>([^<]*)</h6></div><div[^>]*><h4[^>]*>([^<]*)</h4></div></div>.*?</a>'
+SESSIONS_REGEX = r'<a[^>]*href="([^"]*)"[^>]*><div[^>]*><p><span[^>]*>([^<]*)</span></p></div></a><ul[^>]*>(.*?)</ul>'
+SESSION_TALKS_REGEX = r'<a[^>]*href="([^"]*)"[^>]*><div[^>]*><p><span[^>]*>(.*?)</span></p><p[^>]*>([^<]*)</p></div></a>'
+
+TOPICS_REGEX = r'<a[^>]*href=\"([^"]*)\"[^>]*>.*?<h4[^>]*>([^<]*)</h4>.*?</a>'
+TOPIC_TALKS_REGEX = r'<a[^>]*href="([^"]*)"[^>]*>.*?<h6[^>]*>[^<]*</h6><h6[^>]*>([^<]*)</h6>.*?<h4[^>]*>([^<]*)</h4>.*?</a>'
 
 
 class DummyTqdm:
@@ -160,11 +161,31 @@ def add_to_cache(args, html, url):
         f.write(html)
 
 
+def clean_speaker(title, speaker):
+    if "Sustaining" in title and "Officers" in title:
+        return "Sustaining of officers"
+    elif "Auditing Department" in title:
+        return "Church Audit Report"
+    s = MLStripper()
+    s.feed(speaker)
+    keepcharacters = (' ', '-', '_')
+    return "".join(c for c in s.get_data() if c.isalnum() or c in keepcharacters).rstrip()
+
+
 def clean_title(title):
     s = MLStripper()
     s.feed(title)
     keepcharacters = (' ', '-', '_', '.')
     return "".join(c for c in s.get_data() if c.isalnum() or c in keepcharacters).rstrip()
+
+
+def create_mp3_filename(args, talk):
+    return "{}-{:02d}-{}-{}-{}.mp3".format(
+        talk.session.conference.year,
+        talk.session.conference.month,
+        talk.session.number * 100 + talk.number,
+        talk.speaker.lower().replace(" ", "-"),
+        args.lang)
 
 
 def create_playlists(args, all_talks):
@@ -202,7 +223,7 @@ def download_all_content(args):
             progress_bar.write("Retrieving talk audio files and updating playlists")
         for talk in all_talks:
             progress_bar.set_description_str(talk.title, refresh=True)
-            audio = get_audio(args, f'{LDS_ORG_URL}{decode(talk.link)}')
+            audio = get_audio(args, f'{LDS_ORG_URL}{decode(talk.link)}', create_mp3_filename(args, talk))
             if audio and download_audio(progress_bar, args, get_relative_path(args, talk.session), audio):
                 if not args.noplaylists:
                     update_playlists(args, playlists, talk, audio)
@@ -215,7 +236,7 @@ def download_all_content(args):
         write_playlists(args, playlists)
 
     # Optionally remove cached HTML files
-    if not args.nocleanup:
+    if args.cleanup:
         remove_cached_files(args)
 
 
@@ -240,7 +261,7 @@ def download_audio(progress_bar, args, relpath, audio):
 
 def get_all_conferences(args):
     # Retrieve list of all available conferences
-    all_conferences_html = get_html(args, f'{ALL_CONFERENCES_URL}?lang={args.lang}', nocache=args.nocleanup)
+    all_conferences_html = get_html(args, f'{ALL_CONFERENCES_URL}?lang={args.lang}', nocache=True)
     all_conferences = get_conferences(args, all_conferences_html)
     all_conferences.extend(get_range_conferences(args, all_conferences_html))
     # List is newest to oldest, reverse it before returning list
@@ -248,8 +269,40 @@ def get_all_conferences(args):
     return all_conferences
 
 
+# Sometime after April 2024 the website was changed to load the list of all
+# supported languages dynamically using javascript. This code was added to
+# allow for running the javascript to obtain the list (re)saving the HTML.
+def get_all_languages_2024(args):
+    url = f'{LDS_ORG_URL}/languages'
+    cached = get_from_cache(args, url)
+    if cached:
+        if args.verbose:
+            print("Reading cached: {}".format(url))
+        return cached
+    if not args.verbose:
+        for logger in [logging.getLogger(name) for name in logging.Logger.manager.loggerDict]:
+            logger.setLevel(logging.WARNING)
+    opt = Options()
+    opt.add_argument("--headless=new")
+    opt.add_argument("--enable-chrome-browser-cloud-management")
+    if not args.verbose:
+        service = webdriver.EdgeService(log_output="NUL")
+    else:
+        service = None
+    driver = webdriver.Edge(options=opt, service=service)
+    driver.get(url)
+    try:
+        WebDriverWait(driver, 30).until(
+                EC.presence_of_element_located((By.XPATH, '//a'))
+        )
+        add_to_cache(args, driver.page_source, url)
+        return driver.page_source
+    finally:
+        driver.close()
+
+
 def get_all_languages_map(args):
-    all_languages_html = get_html(args, f'{LDS_ORG_URL}/languages', nocache=args.nocleanup)
+    all_languages_html = get_all_languages_2024(args)
     all_languages_list = re.findall(GET_LANGS_REGEX, all_languages_html, re.S)
     return dict(all_languages_list)
 
@@ -259,26 +312,26 @@ def get_all_talks(args):
     all_conferences = get_all_conferences(args)
 
     # Next retrieve all talks by topic if playlists are enabled
-    if args.noplaylists:
+    if args.noplaylists or args.notopics:
         all_talks_by_topic = []
     else:
         all_talks_by_topic = get_all_talks_by_topic(args)
 
     all_talks = []
     with tqdm(total=len(all_conferences), unit="conferences") as progress_bar:
-        progress_bar.write("Retrieving all general conference sessions and talk links and titles")
+        progress_bar.write("Retrieving all talks by general conference sessions")
         for conference in all_conferences:
-            conference_html = get_html(args, f'{LDS_ORG_URL}{decode(conference.link)}', nocache=args.nocleanup)
+            conference_html = get_html(args, f'{LDS_ORG_URL}{decode(conference.link)}', nocache=True)
             sessions = re.findall(SESSIONS_REGEX, conference_html, re.S)
-            for num, session_info in enumerate(sessions, start=1):
+            for snum, session_info in enumerate(sessions, start=1):
                 progress_bar.set_description_str(f'{conference.title}-{session_info[1]}', refresh=True)
-                session = Session(conference, session_info[0], session_info[1], num*10)
+                session = Session(conference, session_info[0], session_info[1], snum*10)
                 talks = re.findall(SESSION_TALKS_REGEX, session_info[2], re.S)
-                for talk_info in talks:
+                for tnum, talk_info in enumerate(talks, start=1):
                     title = clean_title(talk_info[1])
-                    speaker = talk_info[2]
+                    speaker = clean_speaker(title, talk_info[2])
                     topics = [tbt.topic for tbt in all_talks_by_topic if tbt.title == title and tbt.speaker == speaker]
-                    all_talks.append(Talk(session, talk_info[0], title, speaker, topics))
+                    all_talks.append(Talk(session, talk_info[0], title, speaker, tnum*10, topics))
                     if hasattr(progress_bar, 'running') and not progress_bar.running:
                         break
                 if hasattr(progress_bar, 'running') and not progress_bar.running:
@@ -290,7 +343,7 @@ def get_all_talks(args):
 
 
 def get_all_topics(args):
-    all_topics_html = get_html(args, f'{ALL_TOPICS_URL}?lang={args.lang}', nocache=args.nocleanup)
+    all_topics_html = get_html(args, f'{ALL_TOPICS_URL}?lang={args.lang}', nocache=True)
     return [Topic(topic[0], topic[1]) for topic in re.findall(TOPICS_REGEX, all_topics_html, re.S)]
 
 
@@ -298,15 +351,16 @@ def get_all_talks_by_topic(args):
     all_topics = get_all_topics(args)
     topic_talks = []
     with tqdm(total=len(all_topics), unit="topics") as progress_bar:
-        progress_bar.write("Retrieving all topics")
+        progress_bar.write("Retrieving all talks by topic list")
         for topic in all_topics:
             progress_bar.set_description_str(topic.topic)
-            topic_html = get_html(args, f'{LDS_ORG_URL}{decode(topic.link)}', nocache=args.nocleanup)
-            topic_talks.extend([TalkByTopic(tt[0], tt[1], clean_title(tt[2]), topic.topic) for tt in re.findall(TOPIC_TALKS_REGEX, topic_html, re.S)])
+            topic_html = get_html(args, f'{LDS_ORG_URL}{decode(topic.link)}', nocache=True)
+            topic_talks.extend([TalkByTopic(tt[0], clean_speaker(clean_title(tt[2]), tt[1]), clean_title(tt[2]), topic.topic) for tt in re.findall(TOPIC_TALKS_REGEX, topic_html, re.S)])
             progress_bar.update(1)
             if hasattr(progress_bar, 'running') and not progress_bar.running:
                 break
     return topic_talks
+
 
 # Sometime after October 2023 the website was changed and hides the MP3 link
 # behind two button clicks. This code was added to allow for pushing the
@@ -328,12 +382,11 @@ def get_audio_2024(args, url):
         options = driver.find_element(By.XPATH, '//button[@title="Options"]')
         options.click()
         try:
-            download = WebDriverWait(driver, 10).until(
+            download = WebDriverWait(driver, 20).until(
                 EC.element_to_be_clickable((By.XPATH, '//button[@data-testid="download-menu-button"]'))
             )
             download.click()
-            if args.nocleanup:
-                add_to_cache(args, driver.page_source, url)
+            add_to_cache(args, driver.page_source, url)
             return re.search(MP3_DOWNLOAD_REGEX, driver.page_source)
         finally:
             pass
@@ -341,7 +394,7 @@ def get_audio_2024(args, url):
         driver.close()
 
 
-def get_audio(args, url):
+def get_audio(args, url, mp3_file_name):
     link_html = get_html(args, url)
     mp3_link = re.search(MP3_DOWNLOAD_REGEX, link_html)
     # In April 2022 the MP3 link became buried in base64 encoded script section
@@ -369,10 +422,12 @@ def get_audio(args, url):
         return
 
     # Create audio object with link and filename
-    return Audio(mp3_link.group(1), mp3_file.group(1))
+    return Audio(mp3_link.group(1), mp3_file_name)
 
 
 def get_cache_filename(args, url):
+    if "languages" in url:
+        return f'{args.cache_home}/{url}'
     return f'{args.cache_home}/{args.lang}/{url}'
 
 
@@ -444,7 +499,7 @@ def get_html(args, url, nocache=False):
                 add_to_cache(args, html, url)
             return html
     except Exception as ex:
-        sys.stderr.write(f'Problem with http request ({url}: {ex}')
+        sys.stderr.write(f'Problem with http request ({url}: {ex}\n')
         return ''
 
 
@@ -533,10 +588,11 @@ def gui_get_settings(args):
         [sg.Text("Destination path:", size=(25, 1), justification="right"), sg.FolderBrowse(initial_folder=args.dest, target='-DEST-', size=(10,1)), sg.Text(args.dest, key='-DEST-', size=(40, 1))],
         [sg.Text("Minimum talks for speaker playlist:", size=(25, 1), justification="right"), sg.OptionMenu(values=range(1,10), default_value=args.speaker_min, key='-SPEAKER-MIN-', size=(50,1))],
         [sg.Text("No MP3 playlists:", size=(25, 1), justification="right"), sg.Checkbox(text="Skip creating MP3 playlist files?", default=args.noplaylists, key='-NOPLAYLISTS-')],
+        [sg.Text("No Topics:", size=(25, 1), justification="right"), sg.Checkbox(text="Skip creating topics MP3 playlist files?", default=args.notopics, key='-NOTOPICS-')],
         [sg.Text("Add session Number:", size=(25, 1), justification="right"), sg.Checkbox(text="Order sessions by adding number prefix?", default=not args.nonumbers, key='-NONUMBERS-')],
         [sg.Text('_'  * 150, size=(80, 1))],
         [sg.Text('Other Settings', font=('Helvetica', 16))],
-        [sg.Text("Delete Cached Talks:", size=(25, 1), justification="right"), sg.Checkbox(text="Speed up future downloads by keeping cache of talks?", default=args.nocleanup, key='-NOCLEANUP-')],
+        [sg.Text("Cache Talks:", size=(25, 1), justification="right"), sg.Checkbox(text="Speed up future downloads by keeping cache of talks?", default=not args.cleanup, key='-NOCLEANUP-')],
         [sg.Button('Start Download', key='-BEGIN-', size=(20,3), focus=True), sg.Exit(size=(10,3)), sg.Button('Delete Talks Cache', visible=has_cache, key='-DELETE-', size=(10,3))]
     ]
     window = sg.Window('General Conference Downloader', layout, finalize=True)
@@ -556,9 +612,10 @@ def gui_get_settings(args):
             if args.start > args.end:
                 args.start, args.end = args.end, args.start
             args.dest = window['-DEST-'].TKStringVar.get()
-            args.nocleanup = values['-NOCLEANUP-']
+            args.cleanup = not values['-NOCLEANUP-']
             args.nonumbers = not values['-NONUMBERS-']
             args.noplaylists = values['-NOPLAYLISTS-']
+            args.notopics = values['-NOTOPICS-']
             args.speaker_min = int(values['-SPEAKER-MIN-'])
             break
     window.close()
@@ -687,10 +744,9 @@ if __name__ == '__main__':
     parser.add_argument('-dest',
                         help='Destination folder to output files to.',
                         default=music_home)
-    parser.add_argument('-nocleanup',
-                        help='Leaves temporary files after process completion.',
-                        action="store_true",
-                        default=True)
+    parser.add_argument('-cleanup',
+                        help='Cleanup temporary files after process completion.',
+                        action="store_true")
     parser.add_argument('-verbose',
                         help='Provides detailed activity logging instead of progress bars.',
                         action="store_true")
@@ -699,6 +755,9 @@ if __name__ == '__main__':
                         action="store_true")
     parser.add_argument('-noplaylists',
                         help='Skip creating m3u playlist files',
+                        action="store_true")
+    parser.add_argument('-notopics',
+                        help='Skip downloading speakers by topic',
                         action="store_true")
     parser.add_argument('-nogui',
                         help='Use command line only for options and progress',
